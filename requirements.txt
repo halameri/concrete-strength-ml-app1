@@ -1,0 +1,11 @@
+# requirements.txt
+streamlit
+pandas
+numpy
+scikit-learn
+# Add the specific version you used for stability
+xgboost 
+joblib
+matplotlib 
+seaborn
+# Add any other modules you created (e.g., if src/models.py has non-standard dependencies)
