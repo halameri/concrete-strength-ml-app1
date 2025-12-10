@@ -1,17 +1,27 @@
-# requirements.txt
-streamlit
+# This file is used by Streamlit Cloud and other deployment platforms
+# to recreate the exact environment used for development and training.
+
+# --- Core Libraries (Installed via conda or pip) ---
 pandas
 numpy
-
-# Add the specific version you used for stability
-xgboost 
-joblib
-matplotlib 
+matplotlib
 seaborn
-# Add any other modules you created (e.g., if src/models.py has non-standard dependencies)
+joblib
 tqdm
-# requirements.txt
 streamlit
 
-scikit-learn==1.3.2  # <--- Use the exact version here
+# --- ML Libraries (Crucial for the pipeline) ---
+# NOTE: The '_fill_dtype' error confirms version stability is vital.
+# PIN THIS TO THE EXACT VERSION USED FOR TRAINING (e.g., 1.3.2)
+scikit-learn==1.3.2 
+
+# XGBoost (Often installed from conda-forge, but pip handles it)
+xgboost
+
+# --- Deployment Environment Specifics (Streamlit Cloud uses a Python version) ---
+# Specify Python 3.10 as used in your setup script
+# This is usually placed in a file named 'runtime.txt' for Streamlit, 
+# but including it here provides clarity for other pipelines.
+# For Streamlit Cloud, also include a 'runtime.txt' file with just: python-3.10
+
 openpyxl
