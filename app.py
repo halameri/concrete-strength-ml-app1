@@ -11,7 +11,7 @@ try:
         DATA_FILE_PATH, FEATURE_COLS, TARGET_COL, 
         SIMPLE_ALPHA_GB, SIMPLE_WEIGHT_XGB
     )
-    DEFAULT_MAX_CEMENTITIOUS_SUM = 700 
+    DEFAULT_MAX_CEMENTITIOUS_SUM = 1000 
 except ImportError:
     st.error("Error: Could not import configuration from src.config. Using fallback constants.")
     DATA_FILE_PATH = "path/to/your/data.xlsx"
@@ -19,7 +19,7 @@ except ImportError:
     TARGET_COL = "Compressive Strength, MPa"
     SIMPLE_ALPHA_GB = 0.50
     SIMPLE_WEIGHT_XGB = 0.50
-    DEFAULT_MAX_CEMENTITIOUS_SUM = 700
+    DEFAULT_MAX_CEMENTITIOUS_SUM = 1000
 
 
 # =============================================================================
@@ -37,14 +37,32 @@ def load_models():
         st.error("Model files not found! Please ensure 'final_pipeline_gb.joblib' and 'final_pipeline_xgboost.joblib' are in the same directory.")
         return None, None
 
+# app.py
+
 def get_ensemble_prediction(data_df, gb_pipe, xgb_pipe):
     """Calculates the simple ensemble prediction."""
+    
+    # 1. Ensure input is a DataFrame (handles raw list/numpy array inputs)
     if not isinstance(data_df, pd.DataFrame):
+        # The user input data structure might be an array or list, convert it
         data_df = pd.DataFrame([data_df], columns=FEATURE_COLS)
+    
+    # --- CRITICAL FIX: ENFORCE FEATURE ORDER ---
+    # The ColumnTransformer inside the pipeline expects columns in this precise order.
+    try:
+        data_df = data_df[FEATURE_COLS]
+    except KeyError as e:
+        # This catch is good for debugging but Streamlit will hide it.
+        # It ensures we know if a required feature is missing.
+        raise AttributeError(f"Missing feature in input data: {e}. Check FEATURE_COLS list.")
+    # --- END CRITICAL FIX ---
         
     gb_pred = gb_pipe.predict(data_df)
     xgb_pred = xgb_pipe.predict(data_df)
-    return (SIMPLE_ALPHA_GB * gb_pred) + (SIMPLE_WEIGHT_XGB * xgb_pred)
+    
+    # Ensure the ensemble logic is correct (based on your config imports)
+    final_pred = (SIMPLE_ALPHA_GB * gb_pred) + (SIMPLE_WEIGHT_XGB * xgb_pred)
+    return final_pred
 
 @st.cache_data
 def load_data_bounds():
