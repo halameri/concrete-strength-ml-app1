@@ -6,7 +6,7 @@ from sklearn.model_selection import KFold
 # =============================================================================
 
 # >>> ⚠️ CHANGE THIS TO YOUR ACTUAL ABSOLUTE FILE PATH ⚠️ <<<
-DATA_FILE_PATH = r"D:\Hussein\IboAlameri\Finall_Codes\final data 21-11-2025.xlsx" 
+DATA_FILE_PATH = r"final data 21-11-2025.xlsx" 
 
 # Target Column (Compressive Strength) - Final CORRECTED name
 TARGET_COL = "Compressive Strength, MPa" 
