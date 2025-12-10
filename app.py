@@ -3,24 +3,32 @@ import pandas as pd
 import numpy as np
 import joblib
 import random
-from tqdm import tqdm
+from tqdm import tqdm # Tqdm is not strictly needed for the final Streamlit app, but kept for context.
 
-# --- Import configuration settings (Assumes src.config is available) ---
+# --- 1. Import Configuration Settings (Corrected to be more robust) ---
+# Assuming a standard concrete dataset with 8 inputs.
+# If your actual data only has 5, you must ensure your models were trained on 5.
 try:
     from src.config import (
         DATA_FILE_PATH, FEATURE_COLS, TARGET_COL, 
-        SIMPLE_ALPHA_GB, SIMPLE_WEIGHT_XGB
+        SIMPLE_ALPHA_GB, SIMPLE_WEIGHT_XGB, CEMENTITIOUS_COMPONENTS
     )
     DEFAULT_MAX_CEMENTITIOUS_SUM = 1000 
 except ImportError:
-    st.error("Error: Could not import configuration from src.config. Using fallback constants.")
+    st.warning("Warning: Could not import configuration from src.config. Using fallback constants.")
     DATA_FILE_PATH = "path/to/your/data.xlsx"
-    FEATURE_COLS = ['Age, days', 'C, kg/m3', 'M, kg/m3', 'W, kg/m3', 'CA, kg/m3']
+    # Fallback with standard 8 concrete features (NOTE: Adjust this to match your model's 
+    # exact training features and order, e.g., if you only use C, M, W, CA, and Age)
+    FEATURE_COLS = [
+        'C, kg/m3', 'M, kg/m3', 'W, kg/m3', 'CA, kg/m3', 'FCA, kg/m3', 
+        'SP, kg/m3', 'A, kg/m3', 'Age, days'
+    ]
+    # Define which of the FEATURES are cementitious for the physical constraint
+    CEMENTITIOUS_COMPONENTS = ['C, kg/m3', 'M, kg/m3'] # Placeholder, adjust to your actual mix components
     TARGET_COL = "Compressive Strength, MPa"
     SIMPLE_ALPHA_GB = 0.50
     SIMPLE_WEIGHT_XGB = 0.50
     DEFAULT_MAX_CEMENTITIOUS_SUM = 1000
-
 
 # =============================================================================
 # B. MODEL LOADING & CORE FUNCTIONS
@@ -37,30 +45,32 @@ def load_models():
         st.error("Model files not found! Please ensure 'final_pipeline_gb.joblib' and 'final_pipeline_xgboost.joblib' are in the same directory.")
         return None, None
 
-# app.py
-
-def get_ensemble_prediction(data_df, gb_pipe, xgb_pipe):
+def get_ensemble_prediction(data_df: pd.DataFrame, gb_pipe, xgb_pipe):
     """Calculates the simple ensemble prediction."""
     
-    # 1. Ensure input is a DataFrame (handles raw list/numpy array inputs)
-    if not isinstance(data_df, pd.DataFrame):
-        # The user input data structure might be an array or list, convert it
-        data_df = pd.DataFrame([data_df], columns=FEATURE_COLS)
-    
-    # --- CRITICAL FIX: ENFORCE FEATURE ORDER ---
-    # The ColumnTransformer inside the pipeline expects columns in this precise order.
+    # 1. Ensure input is a DataFrame with correct columns (Robustness fix)
+    if not isinstance(data_df, pd.DataFrame) or data_df.empty:
+        raise ValueError("Input data must be a non-empty Pandas DataFrame.")
+        
+    # --- CRITICAL FIX: ENFORCE FEATURE ORDER and presence ---
+    # This prevents the AttributeError if the pipeline's ColumnTransformer 
+    # receives columns in the wrong order or is missing features.
     try:
         data_df = data_df[FEATURE_COLS]
     except KeyError as e:
-        # This catch is good for debugging but Streamlit will hide it.
-        # It ensures we know if a required feature is missing.
-        raise AttributeError(f"Missing feature in input data: {e}. Check FEATURE_COLS list.")
+        # If this fails, the loaded model and the app's FEATURE_COLS are mismatched
+        st.exception(f"Fatal Error: Input data is missing required feature(s): {e}. Check FEATURE_COLS list and model training.")
+        raise
     # --- END CRITICAL FIX ---
+        
+    # NOTE: The traceback showed an issue with the internal Imputer in the pipeline.
+    # The fix above ensures the input data *format* is correct. If the error persists,
+    # the issue is with how the model pipelines were *saved* (they must be fitted).
         
     gb_pred = gb_pipe.predict(data_df)
     xgb_pred = xgb_pipe.predict(data_df)
     
-    # Ensure the ensemble logic is correct (based on your config imports)
+    # Simple weighted average
     final_pred = (SIMPLE_ALPHA_GB * gb_pred) + (SIMPLE_WEIGHT_XGB * xgb_pred)
     return final_pred
 
@@ -68,8 +78,17 @@ def get_ensemble_prediction(data_df, gb_pipe, xgb_pipe):
 def load_data_bounds():
     """Loads the data and calculates min/max bounds for the inverse search."""
     try:
+        # NOTE: Ensure DATA_FILE_PATH is correct or the fallback logic is robust
         df = pd.read_excel(DATA_FILE_PATH, sheet_name=0)
-        df = df.dropna(subset=FEATURE_COLS + [TARGET_COL])
+        
+        # Ensure only columns needed for the model and target are present
+        required_cols = FEATURE_COLS + [TARGET_COL]
+        # Check if all required columns exist in the loaded DataFrame
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+             raise ValueError(f"Data file is missing columns: {missing_cols}")
+             
+        df = df.dropna(subset=required_cols)
         
         bounds = {}
         for col in FEATURE_COLS:
@@ -96,6 +115,7 @@ def app():
     st.title("🧪 Concrete Strength ML Predictor & Optimizer")
     st.markdown("---")
 
+    # Load models once
     gb_pipe, xgb_pipe = load_models()
     if gb_pipe is None or xgb_pipe is None:
         return
@@ -122,7 +142,9 @@ def forward_prediction_ui(gb_pipe, xgb_pipe, initial_mix_data=None):
     if not is_validation:
         st.header("1️⃣ Predict Compressive Strength from a Mix Design")
         st.markdown("**Note:** This mode allows any input, including values outside the training range (extrapolation risk).")
-    
+        # Add a visual aid for the pipeline
+        st.caption("Prediction Pipeline: Input $\\rightarrow$ Preprocessing/Imputation $\\rightarrow$ Model $\\rightarrow$ Output")
+        
     input_data = {}
     max_val_float = 1500.0 
     
@@ -137,12 +159,14 @@ def forward_prediction_ui(gb_pipe, xgb_pipe, initial_mix_data=None):
 
         with cols[col_index]:
             
-            if feature == 'Age, days':
+            # --- Age Input Handling ---
+            if 'Age, days' in feature:
                 step_size = 1
                 default_v = 28
                 
                 input_value = default_v
                 if initial_val is not None:
+                    # Ensure consistent integer conversion for Age
                     input_value = int(round(float(initial_val))) 
 
                 val = st.number_input(
@@ -154,16 +178,18 @@ def forward_prediction_ui(gb_pipe, xgb_pipe, initial_mix_data=None):
                     format="%d",
                     key=f'input_{feature}_{is_validation}'
                 )
+            # --- Material Input Handling ---
             else:
                 step_size = 1.0
-                default_v = 10.0
-                
-                if 'C,' in feature:
-                    default_v = 350.0
+                # Set reasonable defaults based on component type
+                if 'C,' in feature or 'M,' in feature:
+                    default_v = 350.0 if 'C,' in feature else 50.0
                 elif 'W,' in feature:
                     default_v = 180.0
                 elif 'CA,' in feature:
                     default_v = 1000.0
+                else:
+                    default_v = 10.0 # Default for other additives/fine aggregate
                 
                 input_value = default_v
                 if initial_val is not None:
@@ -183,14 +209,24 @@ def forward_prediction_ui(gb_pipe, xgb_pipe, initial_mix_data=None):
     
     if not is_validation:
         if st.button("Calculate Strength ➡️", type="primary"):
-            input_df = pd.DataFrame([input_data], columns=FEATURE_COLS)
-            prediction = get_ensemble_prediction(input_df, gb_pipe, xgb_pipe)[0]
-            
-            st.subheader("Results:")
-            st.metric(label="Predicted Compressive Strength", value=f"{prediction:.2f} MPa")
-            st.success("Prediction calculated successfully.")
-            return prediction
+            try:
+                # Use a Series and convert to DF to maintain correct feature order
+                input_series = pd.Series(input_data, index=FEATURE_COLS)
+                input_df = input_series.to_frame().T
+                
+                prediction = get_ensemble_prediction(input_df, gb_pipe, xgb_pipe)[0]
+                
+                st.subheader("Results:")
+                st.metric(label="Predicted Compressive Strength", value=f"{prediction:.2f} MPa")
+                st.success("Prediction calculated successfully.")
+                return prediction
+            except Exception as e:
+                # Catch any error from prediction/pipeline and display it clearly
+                st.error(f"An error occurred during prediction: {e}")
+                st.error("Please check the input values and ensure the models were trained and loaded correctly.")
+                return None
     
+    # Return the dictionary for the optimization validation step
     return input_data
 
 # --- 2. Inverse Optimization UI ---
@@ -198,7 +234,13 @@ def inverse_optimization_ui(gb_pipe, xgb_pipe):
     st.header("2️⃣ Optimize Mix Design for Target Strength")
     st.markdown("Finds the optimal mix design to meet a **Target Strength**, constrained by your custom requirements.")
     
-    # --- Target and Iteration Setup ---
+    # Load data bounds once
+    bounds = load_data_bounds()
+    if not bounds:
+        st.warning("Cannot run optimization. Failed to load data bounds.")
+        return
+
+    # ... (Target and Iteration Setup remains the same) ...
     col_target, col_iters = st.columns(2)
     with col_target:
         target_strength = st.number_input(
@@ -214,15 +256,12 @@ def inverse_optimization_ui(gb_pipe, xgb_pipe):
     st.subheader("Optimization Constraints (Customizable)")
     
     # --- Constraint Selection ---
-    available_features = FEATURE_COLS
-    
-    # Remove Age from the multi-select since it has its own dedicated inputs
-    adjustable_features = [f for f in available_features if f != 'Age, days']
+    adjustable_features = [f for f in FEATURE_COLS if 'Age, days' not in f]
 
     constrained_features = st.multiselect(
         "Select parameters to manually constrain (e.g., Min Cement or Max Water):",
         options=adjustable_features,
-        default=['C, kg/m3', 'W, kg/m3']
+        default=CEMENTITIOUS_COMPONENTS + ['W, kg/m3'] # Use the defined cementitious components
     )
 
     # --- Age and Cement Sum Constraints (Fixed Position) ---
@@ -230,10 +269,10 @@ def inverse_optimization_ui(gb_pipe, xgb_pipe):
     col_age, col_cement = st.columns(2)
     
     # 1. Age Constraint
-    bounds = load_data_bounds()
     min_age_data, max_age_data = 1, 365
     if 'Age, days' in bounds:
-        min_age_data, max_age_data = int(bounds['Age, days'][0]), int(bounds['Age, days'][1])
+        # Use floor/ceil to safely convert float bounds to integers
+        min_age_data, max_age_data = int(np.floor(bounds['Age, days'][0])), int(np.ceil(bounds['Age, days'][1]))
         
     with col_age:
         st.markdown("**Age Range (days):** (Must be within data bounds)")
@@ -249,21 +288,23 @@ def inverse_optimization_ui(gb_pipe, xgb_pipe):
             "Maximum Total Cementitious Sum ($\text{kg/m}^3$):",
             min_value=100.0, max_value=1500.0, value=float(DEFAULT_MAX_CEMENTITIOUS_SUM), step=50.0, key="max_cement_sum", format="%.1f"
         )
-        st.caption("Limits the sum of all nine powder components.")
+        st.caption(f"Limits the sum of selected cementitious components: {', '.join(CEMENTITIOUS_COMPONENTS)}")
 
     # --- Dynamic Constraints (Based on Multiselect) ---
     st.markdown("#### Parameter Value Constraints (Min/Max):")
     user_constraints = {}
     
     if constrained_features:
-        cols = st.columns(2)
+        cols_constraints = st.columns(2) # Renamed to avoid conflict
         
         for i, feature in enumerate(constrained_features):
             # Get the data bounds for this feature to guide user input
-            data_min, data_max = bounds.get(feature, (0.0, 100.0))
+            data_min, data_max = bounds.get(feature, (0.0, 1500.0))
+            data_min = float(data_min)
+            data_max = float(data_max)
             
-            with cols[i % 2]:
-                st.markdown(f"**{feature}:** (Must be within data range: {data_min:.1f} - {data_max:.1f})")
+            with cols_constraints[i % 2]:
+                st.markdown(f"**{feature}:** (Data range: {data_min:.1f} - {data_max:.1f})")
                 
                 col_min, col_max = st.columns(2)
                 with col_min:
@@ -282,17 +323,14 @@ def inverse_optimization_ui(gb_pipe, xgb_pipe):
 
     if st.button("Start Optimization & Validation 🚀", type="primary"):
         
-        if not bounds:
-             return
-        
         # --- Prepare constraints for optimizer ---
         # 1. Initialize effective bounds with data bounds
         effective_bounds = {k: list(v) for k, v in bounds.items()}
         
-        # 2. Apply user-defined Age constraint (overrides data bounds for age)
+        # 2. Apply user-defined Age constraint
         effective_bounds['Age, days'] = [float(min_age), float(max_age)]
         
-        # 3. Apply user-defined individual parameter constraints (overrides data bounds if stricter)
+        # 3. Apply user-defined individual parameter constraints
         for feature, (user_min, user_max) in user_constraints.items():
             # Apply the stricter minimum (max of data min and user min)
             effective_bounds[feature][0] = max(effective_bounds[feature][0], user_min)
@@ -303,14 +341,16 @@ def inverse_optimization_ui(gb_pipe, xgb_pipe):
         effective_bounds = {k: tuple(v) for k, v in effective_bounds.items()}
         
         with st.spinner("Running constrained iterative optimization..."):
-            best_mix, best_prediction, min_error = run_optimization(
+            best_mix_array, best_prediction, min_error = run_optimization(
                 gb_pipe, xgb_pipe, target_strength, n_iterations, effective_bounds, max_cement_sum
             )
 
         st.subheader("Optimization Results & Validation:")
         
-        if best_mix is not None:
-            # ... (Result display logic remains the same)
+        if best_mix_array is not None:
+            # Convert the array to a dictionary for clear display
+            best_mix_dict = dict(zip(FEATURE_COLS, best_mix_array))
+
             st.success("✅ **Step 1: Optimal Mix Found by Inverse Search**")
             
             col_res1, col_res2 = st.columns(2)
@@ -319,15 +359,16 @@ def inverse_optimization_ui(gb_pipe, xgb_pipe):
                 st.metric("Predicted Strength from Inverse Search", f"{best_prediction:.2f} MPa")
             with col_res2:
                 st.metric("Minimum Error Achieved", f"{min_error:.4f} MPa")
-            
-            results_series = pd.Series(best_mix, index=FEATURE_COLS)
+                
+            results_series = pd.Series(best_mix_dict, index=FEATURE_COLS)
             results_df = results_series.to_frame(name='Optimal Quantity (kg/m³ or days)').T
             st.dataframe(results_df.round(3), use_container_width=True)
             
             st.markdown("---")
             st.info("🔄 **Step 2: Validation Check**")
 
-            validation_df = pd.DataFrame([best_mix], columns=FEATURE_COLS)
+            # Validation: Pass the optimal mix to the forward prediction function
+            validation_df = pd.DataFrame([best_mix_dict], columns=FEATURE_COLS)
             final_validation_pred = get_ensemble_prediction(validation_df, gb_pipe, xgb_pipe)[0]
 
             col_val1, col_val2 = st.columns(2)
@@ -352,22 +393,27 @@ def run_optimization(gb_pipe, xgb_pipe, target_strength, n_iterations, effective
     feature_names = FEATURE_COLS
     progress_bar = st.progress(0, text="Optimizing... 0%")
     
-    # Define cementitious components once
-    c_sum_components = ['C, kg/m3', 'M, kg/m3', 'CC, kg/m3', 'LS, kg/m3', 'g, kg/m3', 'CB, kg/m3', 'G, kg/m3', 'SF, kg/m3', 'FA, kg/m3']
+    # --- CRITICAL FIX: Ensure CEMENTITIOUS_COMPONENTS are present in FEATURE_COLS ---
+    # Determine the indices of the cementitious components *from the actual feature list*
     try:
-        component_indices = [feature_names.index(comp) for comp in c_sum_components if comp in feature_names]
-    except ValueError:
+        component_indices = [feature_names.index(comp) for comp in CEMENTITIOUS_COMPONENTS if comp in feature_names]
+        if not component_indices:
+            st.error("Error: None of the defined CEMENTITIOUS_COMPONENTS are in FEATURE_COLS.")
+            return None, None, float('inf')
+    except ValueError as e:
+        # Should be caught by the check above, but as a safeguard:
+        st.error(f"Error mapping cement components: {e}")
         return None, None, float('inf')
 
 
     for i in range(n_iterations):
         mix_values = []
         
-        # 1. Generate mix based on EFFECTIVE BOUNDS (data bounds + user Min/Max)
+        # 1. Generate mix based on EFFECTIVE BOUNDS
         for feature in feature_names:
             min_val, max_val = effective_bounds[feature]
             
-            if feature == 'Age, days':
+            if 'Age, days' in feature:
                 # Use integer bounds for age
                 val = random.randint(int(min_val), int(max_val))
             else:
@@ -377,11 +423,13 @@ def run_optimization(gb_pipe, xgb_pipe, target_strength, n_iterations, effective
         
         current_mix = np.array(mix_values)
         
-        # 2. Check Physical Constraint: Cementitious Sum (Uses GUI input: max_cement_sum)
+        # 2. Check Physical Constraint: Cementitious Sum 
+        # Only sum the components that were successfully mapped in component_indices
         current_c_sum = current_mix[component_indices].sum()
         if current_c_sum > max_cement_sum:
             continue 
 
+        # Create DataFrame for prediction (must preserve order of FEATURE_COLS)
         mix_df = pd.DataFrame([current_mix], columns=feature_names)
         
         # 3. Prediction
@@ -394,8 +442,9 @@ def run_optimization(gb_pipe, xgb_pipe, target_strength, n_iterations, effective
             best_mix = current_mix
             best_prediction = prediction
 
-        if i % (n_iterations // 50) == 0:
-            progress_bar.progress((i + 1) / n_iterations, text=f"Optimizing... {i+1}/{n_iterations}")
+        # Update progress bar (Optimized for fewer updates)
+        if i % (n_iterations // 100) == 0:
+            progress_bar.progress(i / n_iterations, text=f"Optimizing... {i}/{n_iterations}")
 
     progress_bar.progress(1.0, text="Optimization Complete!")
     return best_mix, best_prediction, min_error
