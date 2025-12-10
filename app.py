@@ -231,7 +231,7 @@ def inverse_optimization_ui(gb_pipe, xgb_pipe):
     
     # 1. Age Constraint
     bounds = load_data_bounds()
-    min_age_data, max_age_data = 1, 730
+    min_age_data, max_age_data = 1, 365
     if 'Age, days' in bounds:
         min_age_data, max_age_data = int(bounds['Age, days'][0]), int(bounds['Age, days'][1])
         
