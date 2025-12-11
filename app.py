@@ -3,57 +3,38 @@ import pandas as pd
 import numpy as np
 import joblib
 import random
-from tqdm import tqdm # Kept for context, but not strictly required for Streamlit runtime
+# from tqdm import tqdm # Not needed in Streamlit runtime
 
 # =============================================================================
-# A. CONFIGURATION (Based on 13 Feature Model)
+# A. CONFIGURATION
 # =============================================================================
 
-# Define the exact 13 features and their order as used during model training.
-# This list is CRITICAL for the ColumnTransformer in the pipeline.
-MODEL_FEATURE_COLS = [
-    'Age, days',     # Must be first for consistency 
-    'C, kg/m3', 
-    'M, kg/m3', 
-    'CC, kg/m3', 
-    'LS, kg/m3', 
-    'g, kg/m3', 
-    'CB, kg/m3', 
-    'G, kg/m3', 
-    'SF, kg/m3', 
-    'FA, kg/m3', # Fine Aggregate
-    'CA, kg/m3', # Coarse Aggregate
-    'W, kg/m3',  # Water
-    'SP, kg/m3', # Superplasticizer
-]
-
-# Define components for the physical constraint (Sum of Cementitious Materials)
-CEMENTITIOUS_COMPONENTS = [
-    'C, kg/m3', 'M, kg/m3', 'CC, kg/m3', 'LS, kg/m3', 
-    'g, kg/m3', 'CB, kg/m3', 'G, kg/m3', 'SF, kg/m3', 
-    'FA, kg/m3' # Assumed part of the total powder check
-]
-
+# --- Import configuration settings (Assumes src.config is available) ---
 try:
-    # Attempt to import config (recommended for production)
     from src.config import (
-        DATA_FILE_PATH, TARGET_COL, SIMPLE_ALPHA_GB, SIMPLE_WEIGHT_XGB, 
+        DATA_FILE_PATH, FEATURE_COLS, TARGET_COL, 
+        SIMPLE_ALPHA_GB, SIMPLE_WEIGHT_XGB, 
     )
-    # Validate imported FEATURE_COLS against the known model list if needed, 
-    # but for a quick fix, we hardcode the known correct list above.
+    # Define CEMENTITIOUS_COMPONENTS using the feature list from config 
+    # (assuming these names are exactly as defined in FEATURE_COLS)
+    CEMENTITIOUS_COMPONENTS = [
+        'C, kg/m3', 'M, kg/m3', 'CC, kg/m3', 'LS, kg/m3', 
+        'g, kg/m3', 'CB, kg/m3', 'G, kg/m3', 'SF, kg/m3', 
+        'FA, kg/m3' # Assumed part of the total powder check
+    ]
+    DEFAULT_MAX_CEMENTITIOUS_SUM = 1000 # Use a sensible default
     
-    # Placeholder for constants not in the imported config
-    DEFAULT_MAX_CEMENTITIOUS_SUM = 1000 
 except ImportError:
-    st.warning("Warning: Could not import configuration from src.config. Using hardcoded constants.")
-    DATA_FILE_PATH = "path/to/your/data.xlsx"
+    st.error("Fatal Error: Could not import configuration from src.config. Ensure 'src/config.py' is present.")
+    # Fallback constants (only for emergency display, prediction will likely fail)
+    DATA_FILE_PATH = "final data 21-11-2025.xlsx" 
+    FEATURE_COLS = ['Age, days', 'C, kg/m3', 'M, kg/m3', 'W, kg/m3', 'CA, kg/m3']
     TARGET_COL = "Compressive Strength, MPa"
     SIMPLE_ALPHA_GB = 0.50
     SIMPLE_WEIGHT_XGB = 0.50
-    DEFAULT_MAX_CEMENTITIOUS_SUM = 1000
+    DEFAULT_MAX_CEMENTITIOUS_SUM = 700
+    CEMENTITIOUS_COMPONENTS = ['C, kg/m3'] 
 
-# Feature columns used throughout the app are now MODEL_FEATURE_COLS
-FEATURE_COLS = MODEL_FEATURE_COLS
 
 # =============================================================================
 # B. MODEL LOADING & CORE FUNCTIONS
@@ -63,7 +44,7 @@ FEATURE_COLS = MODEL_FEATURE_COLS
 def load_models():
     """Loads the trained ensemble pipelines."""
     try:
-        # NOTE: Ensure these files exist in the same directory or accessible path
+        # NOTE: Model files must be in the accessible root directory
         gb_pipe = joblib.load("final_pipeline_gb.joblib")
         xgb_pipe = joblib.load("final_pipeline_xgboost.joblib")
         return gb_pipe, xgb_pipe
@@ -79,12 +60,12 @@ def get_ensemble_prediction(data_df: pd.DataFrame, gb_pipe, xgb_pipe):
         raise ValueError("Input data must be a non-empty Pandas DataFrame.")
         
     # --- CRITICAL FIX: ENFORCE FEATURE ORDER and presence ---
-    # This step ensures the ColumnTransformer receives the correct 13 columns 
+    # This step ensures the ColumnTransformer receives the correct features 
     # in the correct order, resolving the input mismatch error.
     try:
         data_df = data_df[FEATURE_COLS]
     except KeyError as e:
-        # This occurs if the input data lacks one of the 13 required columns
+        # This occurs if the input data lacks one of the required columns
         st.exception(f"Fatal Error: Input data is missing required feature(s): {e}. Expected 13 features.")
         raise
     # --- END CRITICAL FIX ---
@@ -107,6 +88,7 @@ def load_data_bounds():
         if missing_cols:
              raise ValueError(f"Data file is missing columns: {missing_cols}")
              
+        # Clean data before calculating bounds
         df = df.dropna(subset=required_cols)
         
         bounds = {}
@@ -165,7 +147,6 @@ def forward_prediction_ui(gb_pipe, xgb_pipe, initial_mix_data=None):
     input_data = {}
     max_val_float = 1500.0 
     
-    # Use 3 columns for layout
     cols = st.columns(3)
     
     for i, feature in enumerate(FEATURE_COLS):
@@ -205,7 +186,7 @@ def forward_prediction_ui(gb_pipe, xgb_pipe, initial_mix_data=None):
                 elif 'FA,' in feature: default_v = 700.0
                 elif 'SP,' in feature: default_v = 5.0
                 elif feature in CEMENTITIOUS_COMPONENTS: default_v = 50.0 
-                else: default_v = 10.0 # Catch-all for other additives
+                else: default_v = 10.0 
                 
                 input_value = default_v
                 if initial_val is not None:
@@ -226,9 +207,8 @@ def forward_prediction_ui(gb_pipe, xgb_pipe, initial_mix_data=None):
     if not is_validation:
         if st.button("Calculate Strength ➡️", type="primary"):
             try:
-                # Use a Series and convert to DF to maintain correct feature order
-                input_series = pd.Series(input_data, index=FEATURE_COLS)
-                input_df = input_series.to_frame().T
+                # Create DataFrame ensuring correct feature order
+                input_df = pd.DataFrame([input_data], columns=FEATURE_COLS)
                 
                 prediction = get_ensemble_prediction(input_df, gb_pipe, xgb_pipe)[0]
                 
@@ -370,6 +350,7 @@ def inverse_optimization_ui(gb_pipe, xgb_pipe):
             st.markdown("---")
             st.info("🔄 **Step 2: Validation Check**")
 
+            # Must use the correct DataFrame creation here, ensuring column order
             validation_df = pd.DataFrame([best_mix_dict], columns=FEATURE_COLS)
             final_validation_pred = get_ensemble_prediction(validation_df, gb_pipe, xgb_pipe)[0]
 
@@ -395,8 +376,7 @@ def run_optimization(gb_pipe, xgb_pipe, target_strength, n_iterations, effective
     feature_names = FEATURE_COLS
     progress_bar = st.progress(0, text="Optimizing... 0%")
     
-    # --- FIX: Ensure CEMENTITIOUS_COMPONENTS are correctly indexed ---
-    # This uses the correct global list CEMENTITIOUS_COMPONENTS
+    # --- Ensure CEMENTITIOUS_COMPONENTS are correctly indexed ---
     try:
         component_indices = [feature_names.index(comp) for comp in CEMENTITIOUS_COMPONENTS if comp in feature_names]
         if not component_indices:
